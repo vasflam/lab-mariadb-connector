@@ -1,0 +1,20 @@
+package capabilities
+
+const MYSQL = 1
+const CONNECT_WITH_DB = 8
+const IGNORE_SPACE = 256
+const PROTOCOL_41 = 1 << 9
+const SECURE_CONNECTION = 1 << 13
+const PLUGIN_AUTH = 1 << 19
+const CONNECT_ATTRS = 1 << 20
+const PLUGIN_AUTH_LENENC_CLIENT_DATA = 1 << 21
+const SESSION_TRACK = 1 << 23
+const DEPRECATE_EOF = 1 << 24
+const MARIADB_CLIENT_EXTENDED_TYPE_INFO = 1 << 35
+
+var DEFAULT int =
+    IGNORE_SPACE |
+    PROTOCOL_41 |
+    SECURE_CONNECTION
+
+
