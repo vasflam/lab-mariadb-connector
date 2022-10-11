@@ -9,7 +9,28 @@ import (
     "fmt"
 )
 
-var PLACEHOLDER = fmt.Errorf("fmt placeholder")
+/**
+ * Hash password for mysql_native_password auth
+ */
+func hashPassword(password string, salt []byte) []byte {
+    var hash [20]byte
+    stage1 := make([]byte, 20)
+    stage2 := make([]byte, 20)
+    hash = sha1.Sum([]byte(password)) 
+    copy(stage1, hash[:])
+    hash = sha1.Sum(stage1)
+    copy(stage2, hash[:])
+    h := sha1.New()
+    h.Write(salt)
+    h.Write(stage2)
+    digest := h.Sum(nil)
+    fmt.Printf("stage1: %v\ndigest: %v\nstage2: %v\n", stage1, digest, stage2)
+    for i := 0; i < len(digest); i++ {
+        fmt.Printf("%v : %v = %v\n", stage1[i], digest[i], stage1[i] ^ digest[i])
+        digest[i] = stage1[i] ^ digest[i]
+    }
+    return digest
+}
 
 /**
  *
@@ -18,14 +39,15 @@ type Packet struct {
     pos    int
     payload []byte
     hasHeader bool
+    markedPos int
+    hasMarkedPos bool
 }
-
 
 func (p Packet) bytes() []byte {
     return p.payload
 }
 
-func (p Packet) len() int {
+func (p Packet) length() int {
     return len(p.payload)
 }
 
@@ -64,6 +86,10 @@ func (p *Packet) readBytes(n int) []byte {
     buf := p.payload[p.pos:p.pos+n]
     p.pos += n
     return buf
+}
+
+func (p *Packet) readBytesRest() []byte {
+    return p.payload[p.pos:]
 }
 
 func (p *Packet) readInt8() int8 {
@@ -172,29 +198,31 @@ func (p *Packet) writeLengthCoded(length uint64) {
 
 func (p *Packet) writeHeader(b []byte) {
     if !p.hasHeader {
-        p.writeBytes(b[0:4])
+        header := b[0:4]
+        p.payload = append(header, p.payload...)
         p.hasHeader = true
     }
 }
 
+func (p *Packet) writeEmptyHeader() {
+    p.writeHeader([]byte{0, 0, 0, 0})
+}
+
 func (p *Packet) updateHeader() {
-    length := len(p.payload)
-    if p.hasHeader {
-        length -= 4
+    if !p.hasHeader {
+        p.writeEmptyHeader()
     }
+
+    length := len(p.payload) - 4
     temp := Packet{}
     temp.writeUInt24(uint32(length))
-    temp.writeUInt8(0)
     header := temp.bytes()
 
     if p.hasHeader {
-        for i := 0; i < 4; i++ {
+        for i := 0; i < 3; i++ {
             p.payload[i] = header[i]
         }
-    } else {
-        p.payload = append(header, p.payload...)
     }
-    p.hasHeader = true
 }
 
 func (p *Packet) setSequence(i uint8) {
@@ -205,22 +233,21 @@ func (p *Packet) setSequence(i uint8) {
 
 func (p Packet) getSequence() uint8 {
     if p.hasHeader {
-        return p.payload[4]
+        return p.payload[3]
     }
     return 0
 }
-
 
 /**
  * See: https://mariadb.com/kb/en/connection/#initial-handshake-packet
  */
 type HandshakeRequestPacket struct {
     status       uint16
-    scramble     string
+    scramble     []byte
     collation    uint8
     connection   uint32
     pluginName   string
-    capabilities int
+    capabilities int64
 
     serverVersion    string
     protocolVersion  uint8
@@ -235,15 +262,17 @@ func CreateHandshakeRequestPacket(packet *Packet) *HandshakeRequestPacket {
     if (packet.hasHeader) {
         packet.skip(4)
     }
+
     hsr.protocolVersion = packet.readUInt8()
     hsr.serverVersion = packet.readStringNullEnded()
     hsr.connection = packet.readUInt32()
-    hsr.scramble = string(packet.readBytes(8)) // scramble 1st part (authentication seed)
+    hsr.scramble = packet.readBytes(8) // scramble 1st part (authentication seed)
     packet.skip(1)
-    hsr.capabilities = int(packet.readUInt16())
+    hsr.capabilities = int64(packet.readUInt16())
     hsr.collation = packet.readUInt8()
     hsr.status = packet.readUInt16()
-    hsr.capabilities += int(packet.readUInt16()) << 16
+    hsr.capabilities += int64(packet.readUInt16()) << 16
+    fmt.Printf("caps1: %d\n", hsr.capabilities)
 
     if hsr.capabilities & capabilities.PLUGIN_AUTH != 0 {
         hsr.pluginDataLength = packet.readUInt8()
@@ -252,21 +281,31 @@ func CreateHandshakeRequestPacket(packet *Packet) *HandshakeRequestPacket {
     }
 
     packet.skip(6)
-
     if hsr.capabilities & capabilities.MYSQL  != 0 {
         packet.skip(4)
     } else {
-        hsr.capabilities += int(packet.readUInt32()) << 32
+        hsr.capabilities += int64(packet.readUInt32()) << 32
     }
 
+    fmt.Printf("srcamble1: %v\n", []byte(hsr.scramble))
     if hsr.capabilities & capabilities.SECURE_CONNECTION != 0 {
-        hsr.scramble = hsr.scramble + string(packet.readBytes(int(math.Max(12, float64(hsr.pluginDataLength)-9))))
+        scramble2 := packet.readBytes(int(math.Max(12, float64(hsr.pluginDataLength)-9)))
+        hsr.scramble = append(hsr.scramble, scramble2...)
         packet.skip(1)
     }
 
     if hsr.capabilities & capabilities.PLUGIN_AUTH != 0 {
         hsr.pluginName = packet.readStringNullEnded()
     }
+
+    fmt.Printf("pversion=%d\n", hsr.protocolVersion)
+    fmt.Printf("sversion=%s\n", hsr.serverVersion)
+    fmt.Printf("connection=%d\n", hsr.connection)
+    fmt.Printf("scrable=%v\n", hsr.scramble)
+    fmt.Printf("caps=%d\n", hsr.capabilities)
+    fmt.Printf("collation=%d\n", hsr.collation)
+    fmt.Printf("status=%d\n", hsr.status)
+    fmt.Printf("pluginname=%s\n", hsr.pluginName)
 
     return hsr
 }
@@ -283,9 +322,17 @@ func CreateHandshakeResponsePacket(
          clientCapabilities |= capabilities.PLUGIN_AUTH
      }
 
-     if hsreq.capabilities & capabilities.MARIADB_CLIENT_EXTENDED_TYPE_INFO != 0 {
+     /*
+     if hsreq.capabilities & capabilities.MYSQL == 0 {
          clientCapabilities |= capabilities.MARIADB_CLIENT_EXTENDED_TYPE_INFO
      }
+     */
+
+     /*
+     if hsreq.capabilities & capabilities.MARIADB_CLIENT_STMT_BULK_OPERATIONS != 0 {
+         clientCapabilities |= capabilities.MARIADB_CLIENT_STMT_BULK_OPERATIONS
+     }
+     */
 
      if config.Database != "" && (hsreq.capabilities & capabilities.CONNECT_WITH_DB != 0) {
          clientCapabilities |= capabilities.CONNECT_WITH_DB
@@ -298,38 +345,30 @@ func CreateHandshakeResponsePacket(
          authToken = []byte(config.Password)
          authPlugin = pluginName
      case "mysql_native_password":
-         var hash [20]byte
-         stage1 := make([]byte, 20)
-         stage2 := make([]byte, 20)
-         hash = sha1.Sum([]byte(config.Password)) 
-         copy(hash[:], stage1)
-         hash = sha1.Sum(stage1)
-         copy(hash[:], stage2)
-         h := sha1.New()
-         h.Write([]byte(hsreq.scramble))
-         h.Write(stage2)
-         digest := h.Sum(nil)
-         for i := 0; i < len(digest); i++ {
-             digest[i] = stage1[i] ^ digest[i]
-         }
-         authToken = digest
+         authToken = hashPassword(config.Password, hsreq.scramble)
          authPlugin = pluginName
      default:
          panic(`Only 'mysql_native_password' and 'mysql_clear_password' authentication is supported`)
     }
 
     packet := &Packet{}
-    packet.writeBytes([]byte{0,0,0,0})
+    packet.writeEmptyHeader()
+    fmt.Printf("op1: %d (%d)\n", uint32(clientCapabilities & 0xffffffff), clientCapabilities)
     packet.writeUInt32(uint32(clientCapabilities & 0xffffffff))
+    //packet.writeUInt32(uint32(28222218))
     packet.writeUInt32(1073741824) // 1MB
+    packet.writeUInt8(hsreq.collation)
     for i := 0; i < 19; i++ {
         packet.writeUInt8(0)
     }
+    fmt.Printf("op2: %d\n", uint32(clientCapabilities >> 32))
+    //packet.writeUInt32(28)
     packet.writeUInt32(uint32(clientCapabilities >> 32))
     packet.writeBytes([]byte(config.Username))
     packet.writeUInt8(0)
 
     if hsreq.capabilities & capabilities.PLUGIN_AUTH_LENENC_CLIENT_DATA != 0 {
+        fmt.Printf("atoken: %v\n", authToken)
         packet.writeLengthCoded(uint64(len(authToken)))
         packet.writeBytes(authToken)
     } else if hsreq.capabilities & capabilities.SECURE_CONNECTION != 0 {
@@ -340,23 +379,27 @@ func CreateHandshakeResponsePacket(
         packet.writeUInt8(0)
     }
 
-    if hsreq.capabilities & capabilities.CONNECT_WITH_DB != 0 {
+    if clientCapabilities  & capabilities.CONNECT_WITH_DB != 0 {
         packet.writeBytes([]byte(config.Database))
+        packet.writeUInt8(0)
     }
 
     if hsreq.capabilities & capabilities.PLUGIN_AUTH != 0 {
         packet.writeBytes([]byte(authPlugin))
+        packet.writeUInt8(0)
     }
 
     if hsreq.capabilities & capabilities.CONNECT_ATTRS != 0 {
-        // unsupported
+        packet.writeUInt8(0)
     }
 
+    packet.updateHeader()
+    packet.setSequence(1)
     return packet
 }
 
 /**
- * 
+ * See https://mariadb.com/kb/en/err_packet/
  */
 type ErrorPacket struct {
     *Packet
@@ -375,12 +418,33 @@ func (p *ErrorPacket) code() int {
     return int(v)
 }
 
+// TODO mark and restore position in packet
 func (p *ErrorPacket) error() string {
     p.resetPos()
-    code := p.code()
+    message := ""
     if p.code() != 0xff {
         p.skip(7)
-        fmt.Printf("aaaa: %v\n", string(p.peekAt(7)))
+        if string(p.peek()) == "#" {
+            p.skip(1)
+            message = fmt.Sprintf("#[%s] %s", p.readBytes(5), p.readBytesRest())
+        } else {
+            message = string(p.readBytesRest())
+        }
+    } else {
+        message = "progress error reporting is not supported"
     }
-    return ""
+    p.resetPos()
+    return message
 }
+
+/**
+ * See https://mariadb.com/kb/en/ok_packet/
+ */
+type OkPacket struct {
+    *Packet
+}
+
+func CreateOkPacket(packet *Packet) *OkPacket {
+    return &OkPacket{Packet: packet}
+}
+
