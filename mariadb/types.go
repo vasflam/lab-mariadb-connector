@@ -50,7 +50,7 @@ const FIELD_FLAG_ON_UPDATE_NOW_FLAG = 8192
 const FIELD_FLAG_NUM_FLAG = 32768
 
 
-type TableColumn struct {
+type tableColumn struct {
     name string
     fixedFields int
     charset uint16

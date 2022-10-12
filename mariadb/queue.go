@@ -1,22 +1,20 @@
 package mariadb
 
-/**
- * Used for transporting packet between channels
- */
-type QueuePacket struct {
-    c chan QueuePacket
+// used for transporting packet between channels
+type queuePacket struct {
+    c chan queuePacket
     packet *Packet
     error error
 }
 
-func createQueuePacket(packet *Packet) QueuePacket {
-    return QueuePacket{
-         make(chan QueuePacket, 10),
+func createQueuePacket(packet *Packet) queuePacket {
+    return queuePacket{
+         make(chan queuePacket, 10),
          packet,
          nil,
     }
 }
 
-func createQueuePacketError(err error) QueuePacket {
-    return QueuePacket{error:err}
+func createQueuePacketError(err error) queuePacket {
+    return queuePacket{error:err}
 }

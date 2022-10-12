@@ -8,21 +8,19 @@ import (
 )
 
 const (
-    PacketTypeOK = 0x00
-    PacketTypeLOCALINFILE = 0xfb
-    PacketTypeEOF = 0xfe
-    PacketTypeERR = 0xff
+    packetTypeOK = 0x00
+    packetTypeLOCALINFILE = 0xfb
+    packetTypeEOF = 0xfe
+    packetTypeERR = 0xff
 )
 
-type PacketDirection int
+type packetDirection int
 const (
-    IncomingPacket PacketDirection = iota
-    OutgoingPacket
+    incomingPacket packetDirection = iota
+    outgoingPacket
 )
 
-/**
- * Hash password for mysql_native_password auth
- */
+// Hash password for mysql_native_password auth
 func hashPassword(password string, salt []byte) []byte {
     var hash [20]byte
     stage1 := make([]byte, 20)
@@ -41,14 +39,11 @@ func hashPassword(password string, salt []byte) []byte {
     return digest
 }
 
-/**
- *
- */
 type Packet struct {
     payload []byte
     pos    int
     hasHeader bool
-    direction PacketDirection
+    direction packetDirection
     storedPos int
 }
 
@@ -127,12 +122,6 @@ func (p *Packet) readUInt16() uint16 {
     v := binary.LittleEndian.Uint16(p.payload[p.pos:p.pos+2])
     p.pos += 2
     return v
-
-    buf := bytes.NewBuffer(p.payload[p.pos:p.pos+2])
-    var value uint16
-    binary.Read(buf, binary.LittleEndian, &value)
-    p.pos += 2
-    return value
 }
 
 func (p *Packet) readInt24() int32 {
@@ -168,30 +157,28 @@ func (p *Packet) readUInt64() uint64 {
         buf = p.payload[p.pos:p.pos+8]
         p.pos += 8
     }
-    fmt.Printf("%v\n", buf)
     bufLen := len(buf)
     if len(buf) < 8 {
         for i := 0; i < 8 - bufLen; i++ {
             buf = append(buf, 0)
         }
     }
-    fmt.Printf("%v\n", buf)
     v := binary.LittleEndian.Uint64(buf)
     return v
 }
 
-func (p *Packet) readBytesEncodedLength() []byte {
+func (p *Packet) readBytesLengthEncoded() []byte {
     b := int(p.readUInt8())
     return p.readBytes(b)
 }
 
-func (p *Packet) readUIntEncodedLength() int {
-    b := int(p.readUInt8())
-    if b < 0xfb {
-        return b
-    } else if b < 65536 {
+func (p *Packet) readUIntLengthEncoded() int {
+    length := int(p.readUInt8())
+    if length < 0xfb {
+        return length
+    } else if length < 65536 {
         return int(p.readUInt16())
-    } else if b < 16777216 {
+    } else if length < 16777216 {
         return int(p.readUInt24())
     } else {
         return int(p.readUInt64())
@@ -201,6 +188,14 @@ func (p *Packet) readUIntEncodedLength() int {
 func (p *Packet) readStringLengthEncoded() string {
     length := int(p.readUInt8())
     return string(p.readBytes(length))
+}
+
+func (p *Packet) readStringLengthEncodedNULLABLE() (string, bool) {
+    if p.peek() == 0xfb {
+        return "", true
+    }
+    length := int(p.readUInt8())
+    return string(p.readBytes(length)), false
 }
 
 func (p *Packet) writeUInt8(i uint8) {
@@ -314,38 +309,36 @@ func (p Packet) restorePos() {
 }
 
 func (p Packet) isEOF() bool {
-    return p.direction == IncomingPacket &&
-        p.peekAt(4) == PacketTypeEOF &&
+    return p.direction == incomingPacket &&
+        p.peekAt(4) == packetTypeEOF &&
         p.payloadLength() < 9
 }
 
 func (p Packet) isERR() bool {
-    return p.direction == IncomingPacket && p.peekAt(4) == PacketTypeERR
+    return p.direction == incomingPacket && p.peekAt(4) == packetTypeERR
 }
 
 func (p Packet) isOK() bool {
-    return p.direction == IncomingPacket &&
-        p.peekAt(4) == PacketTypeOK &&
+    return p.direction == incomingPacket &&
+        p.peekAt(4) == packetTypeOK &&
         p.payloadLength() < 0xffffff
 }
 
 func (p Packet) isLOCALINFILE() bool {
-    return p.direction == IncomingPacket && p.peekAt(4) == PacketTypeLOCALINFILE
+    return p.direction == incomingPacket && p.peekAt(4) == packetTypeLOCALINFILE
 }
 
-/**
- * See https://mariadb.com/kb/en/err_packet/
- */
-type ErrorPacket struct {
+// See https://mariadb.com/kb/en/err_packet/
+type errorPacket struct {
     *Packet
 }
 
-func createErrorPacket(packet *Packet) *ErrorPacket {
-    e := &ErrorPacket{Packet:packet}
+func createErrorPacket(packet *Packet) *errorPacket {
+    e := &errorPacket{Packet:packet}
     return e
 }
 
-func (p *ErrorPacket) code() int {
+func (p *errorPacket) code() int {
     p.resetPos()
     p.skip(5)
     v := p.Packet.readUInt16()
@@ -353,8 +346,7 @@ func (p *ErrorPacket) code() int {
     return int(v)
 }
 
-// TODO mark and restore position in packet
-func (p *ErrorPacket) error() string {
+func (p *errorPacket) error() string {
     p.resetPos()
     message := ""
     if p.code() != 0xff {
@@ -376,7 +368,7 @@ func createQuitPacket() *Packet {
     packet := &Packet{}
     packet.writeUInt8(COM_QUIT)
     packet.updateHeader()
-    packet.direction = OutgoingPacket
+    packet.direction = outgoingPacket
     return packet
 }
 
@@ -386,7 +378,7 @@ func createInitDbPacket(dbname string) *Packet {
     packet.writeBytes([]byte(dbname))
     packet.writeUInt8(0)
     packet.updateHeader()
-    packet.direction = OutgoingPacket
+    packet.direction = outgoingPacket
     return packet
 }
 
@@ -396,7 +388,7 @@ func createQueryPacket(query string) *Packet {
     packet.writeBytes([]byte(query))
     packet.writeUInt8(0)
     packet.updateHeader()
-    packet.direction = OutgoingPacket
+    packet.direction = outgoingPacket
     return packet
 }
 
@@ -404,6 +396,6 @@ func createPingPacket() *Packet {
     packet := &Packet{}
     packet.writeUInt8(COM_PING)
     packet.updateHeader()
-    packet.direction = OutgoingPacket
+    packet.direction = outgoingPacket
     return packet
 }

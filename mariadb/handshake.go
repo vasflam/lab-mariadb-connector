@@ -5,10 +5,8 @@ import (
     "github.com/vasflam/lab-mysql-connector/mariadb/capabilities"
 )
 
-/**
- * See: https://mariadb.com/kb/en/connection/#initial-handshake-packet
- */
-type HandshakeRequest struct {
+//See https://mariadb.com/kb/en/connection/#initial-handshake-packet
+type handshakeRequest struct {
     status       uint16
     scramble     []byte
     collation    uint8
@@ -21,8 +19,8 @@ type HandshakeRequest struct {
     pluginDataLength uint8
 }
 
-func parseHandshakeRequest(packet *Packet) *HandshakeRequest{
-    hsr := &HandshakeRequest{}
+func parseHandshakeRequest(packet *Packet) *handshakeRequest{
+    hsr := &handshakeRequest{}
 
     if (packet.hasHeader) {
         packet.skip(4)
@@ -64,13 +62,10 @@ func parseHandshakeRequest(packet *Packet) *HandshakeRequest{
     return hsr
 }
 
-/**
- *
- */
 func createHandshakeResponsePacket(
-     hsreq *HandshakeRequest, 
+     hsreq *handshakeRequest, 
      config *Config,
-     info *ConnectionInfo,
+     info *connectionInfo,
  ) *Packet {
      clientCapabilities := capabilities.DEFAULT
      if hsreq.capabilities & capabilities.PLUGIN_AUTH != 0 {

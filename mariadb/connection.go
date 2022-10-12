@@ -6,6 +6,7 @@ import (
     "context"
     "time"
     _ "log"
+    "strconv"
     "github.com/vasflam/lab-mysql-connector/mariadb/capabilities"
 )
 
@@ -15,30 +16,24 @@ const COM_QUERY = 0x03
 const COM_PING = 0x0e
 const COM_RESET_CONN = 0x1f
 
-/**
- * Connection configuration. 
- * Uri in format 'host:port'
- */
+//  Connection configuration. 
+//  Uri in format 'host:port'
 type Config struct {
     Uri string
     Username string
     Password string
     Database string
+    Timeout time.Duration
 }
 
-/**
- *
- */
-type ConnectionInfo struct {
+type connectionInfo struct {
     serverVersion   string
     protocolVersion uint8
     serverCapabilities uint64
     clientCapabilities uint64
 }
 
-/**
- * Describe DB connection
- */
+// Describe database connection
 type Connection struct {
     ctx    context.Context
     cancel context.CancelFunc
@@ -46,15 +41,14 @@ type Connection struct {
     config Config
     socket net.Conn
 
-    info ConnectionInfo
-    packetQueue chan QueuePacket
+    info connectionInfo
+    packetQueue chan queuePacket
     sequence uint8
     lastInsertId int
+    affectedRows int
 }
 
-/**
- * Create new DB connection
- */
+// Establish connection with database
 func Connect(config Config, parentCtx context.Context) (*Connection, error) {
     socket, err := net.Dial("tcp", config.Uri)
     if err != nil {
@@ -67,8 +61,8 @@ func Connect(config Config, parentCtx context.Context) (*Connection, error) {
         config: config,
         socket: socket,
         ready: false,
-        info: ConnectionInfo{},
-        packetQueue: make(chan QueuePacket),
+        info: connectionInfo{},
+        packetQueue: make(chan queuePacket),
     }
 
     err = connection.init()
@@ -80,12 +74,17 @@ func Connect(config Config, parentCtx context.Context) (*Connection, error) {
     return connection, nil
 }
 
+// Gracefuly close conenction
 func (c *Connection) Close() {
     <- c.communicate(createQuitPacket())
 }
 
 func (c *Connection) LastInsertId() int {
     return c.lastInsertId
+}
+
+func (c *Connection) AffectedRows() int {
+    return c.affectedRows
 }
 
 func (c *Connection) recv() (*Packet, error) {
@@ -110,7 +109,7 @@ func (c *Connection) recv() (*Packet, error) {
         return nil, fmt.Errorf("Failed to read packet payload")
     }
     packet.writeBytes(buf)
-    packet.direction = IncomingPacket
+    packet.direction = incomingPacket
 
     if packet.isERR() {
         er := createErrorPacket(packet)
@@ -133,12 +132,8 @@ func (c *Connection) send(packet *Packet) error {
     return nil
 }
 
-/**
- * Send packet to queue channel ad returns
- * chanel with responses
- */ 
-func (c *Connection) communicate(packet *Packet) chan QueuePacket {
-    //fmt.Printf("send packet: %v\n", packet)
+// Sends packet to command queue
+func (c *Connection) communicate(packet *Packet) chan queuePacket {
     q := createQueuePacket(packet)
     go func() {
         c.packetQueue <- q
@@ -150,6 +145,8 @@ func (c *Connection) communicate(packet *Packet) chan QueuePacket {
  * Do hanshake with server
  * See https://mariadb.com/kb/en/connection/
  */
+
+// See https://mariadb.com/kb/en/connection/
 func (c *Connection) init() error {
     packet, err := c.recv()
     if err != nil {
@@ -157,7 +154,7 @@ func (c *Connection) init() error {
     }
 
     request := parseHandshakeRequest(packet)
-    c.info = ConnectionInfo{
+    c.info = connectionInfo{
         protocolVersion: request.protocolVersion,
         serverVersion: request.serverVersion,
         serverCapabilities: request.capabilities,
@@ -189,11 +186,11 @@ func (c *Connection) init() error {
 
 func (c *Connection) drainQueue() {
     ticker := time.NewTicker(10 * time.Second)
-    recvPackets := func (c *Connection, q *QueuePacket, initiator *Packet) {
+    recvPackets := func (c *Connection, q *queuePacket, initiator *Packet) {
         for {
             packet, err := c.recv()
             if err != nil {
-                q.c <- QueuePacket{error:err}
+                q.c <- queuePacket{error:err}
                 break
             }
 
@@ -203,13 +200,12 @@ func (c *Connection) drainQueue() {
                 break
             }
 
-            fmt.Printf("packet: %v\n", packet.payload)
             q.c <- createQueuePacket(packet)
-            if packet.peek() < 9 && packet.peekAt(4) == 0xfe {
+
+            if packet.isOK() || packet.isEOF() {
                 break
             }
         }
-        fmt.Printf("closing channel\n")
         close(q.c)
     }
 
@@ -218,7 +214,7 @@ func (c *Connection) drainQueue() {
         case q := <- c.packetQueue:
             err := c.send(q.packet)
             if err != nil {
-                q.c <- QueuePacket{error: err}
+                q.c <- queuePacket{error: err}
             } else {
                 recvPackets(c, &q, q.packet)
             }
@@ -231,27 +227,26 @@ func (c *Connection) drainQueue() {
     }
 }
 
+// run mysql commands
 func (c *Connection) Query(query string) (QueryResultRows, error){
     q := c.communicate(createQueryPacket(query))
     // read first packet to get columns packets
-    for response := range q {
-        fmt.Printf("%v\n", response.packet)
-    }
-    return nil,nil
     response := <- q
     if response.error != nil {
         return nil, response.error
     }
     packet := response.packet
     if packet.isOK() {
+        packet.skip(4)
         packet.skip(1)
-        _ = packet.readUIntEncodedLength()
-        c.lastInsertId = int(packet.readUIntEncodedLength())
+        c.affectedRows = packet.readUIntLengthEncoded() // affected rows
+        c.lastInsertId = int(packet.readUIntLengthEncoded())
         return nil, nil
     }
+
     columnCount := int(packet.peekAt(4))
     rows := QueryResultRows{}
-    columns := []TableColumn{}
+    columns := []tableColumn{}
     for i := 0; i < columnCount; i++ {
         response := <- q
         if response.error != nil {
@@ -266,23 +261,21 @@ func (c *Connection) Query(query string) (QueryResultRows, error){
         columnAlias := packet.readStringLengthEncoded()
         _ = packet.readStringLengthEncoded() // column
         if c.info.clientCapabilities & capabilities.MARIADB_CLIENT_EXTENDED_TYPE_INFO != 0 {
-            count := packet.readUIntEncodedLength()
-            fmt.Printf("extended type count: %d\n", count)
+            count := packet.readUIntLengthEncoded()
             for i = 0; i < count; i++ {
-                t := packet.readUInt8()
-                v := packet.readStringLengthEncoded()
-                fmt.Printf("\t %d = %s\n", t, v)
+                _ = packet.readUInt8() // type
+                _ = packet.readStringLengthEncoded() // value
             }
         }
 
-        fixedFields := packet.readUIntEncodedLength()
+        fixedFields := packet.readUIntLengthEncoded()
         charset := packet.readUInt16()
         maxColSize := packet.readUInt32()
         fieldType := packet.readUInt8()
         fieldDetailFlag := packet.readUInt16()
         decimals := packet.readUInt8()
         unused := packet.readUInt16()
-        column := TableColumn{
+        column := tableColumn{
             columnAlias,
             fixedFields,
             charset,
@@ -303,7 +296,7 @@ func (c *Connection) Query(query string) (QueryResultRows, error){
         }
         packet := response.packet
 
-        if packet.isEOF() {
+        if packet.isEOF() || packet.isOK() {
             break
         }
         packet.skip(4)
@@ -316,18 +309,20 @@ func (c *Connection) Query(query string) (QueryResultRows, error){
             if kind == MYSQL_TYPE_TINY ||
                 kind == MYSQL_TYPE_SHORT ||
                 kind == MYSQL_TYPE_LONG {
-                    bvalue := packet.readBytesEncodedLength()
-                    packet.pos -= len(bvalue) 
-                    value = (packet.readUIntEncodedLength() - 48)
-                    if value.(int) < 0 {
-                        value = value.(int) - 1
+                    str, isNULL := packet.readStringLengthEncodedNULLABLE()
+                    if isNULL {
+                        value = nil
+                    } else {
+                        var err error
+                        value, err = strconv.Atoi(str)
+                        if err != nil {
+                            return nil, err
+                        }
                     }
-                    fmt.Printf("aaa==%v ; bvalue=%v\n", value, bvalue)
             }
             row[column.name] = value
-            rows = append(rows, row)
-            fmt.Printf("%d: %v\n", i, 1)
         }
+        rows = append(rows, row)
         i += 1
     }
 
