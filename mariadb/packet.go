@@ -168,14 +168,12 @@ func (p *Packet) readUInt64() uint64 {
         buf = p.payload[p.pos:p.pos+8]
         p.pos += 8
     }
-    fmt.Printf("%v\n", buf)
     bufLen := len(buf)
     if len(buf) < 8 {
         for i := 0; i < 8 - bufLen; i++ {
             buf = append(buf, 0)
         }
     }
-    fmt.Printf("%v\n", buf)
     v := binary.LittleEndian.Uint64(buf)
     return v
 }
@@ -186,21 +184,39 @@ func (p *Packet) readBytesEncodedLength() []byte {
 }
 
 func (p *Packet) readUIntEncodedLength() int {
-    b := int(p.readUInt8())
-    if b < 0xfb {
-        return b
-    } else if b < 65536 {
+    length := int(p.readUInt8())
+    if length < 0xfb {
+        return length
+    } else if length < 65536 {
         return int(p.readUInt16())
-    } else if b < 16777216 {
+    } else if length < 16777216 {
         return int(p.readUInt24())
     } else {
         return int(p.readUInt64())
     }
 }
 
+func (p *Packet) readUIntPrefixLength() int {
+    length := int(p.readUInt8())
+    buf := make([]byte, length)
+    copy(buf, p.readBytes(length))
+    packet := &Packet{payload:buf}
+    v := int(packet.readUInt64())
+    fmt.Printf("buf=%v = %d\n", buf, v)
+    return int(packet.readUInt64())
+}
+
 func (p *Packet) readStringLengthEncoded() string {
     length := int(p.readUInt8())
     return string(p.readBytes(length))
+}
+
+func (p *Packet) readStringLengthEncodedNULLABLE() (string, bool) {
+    if p.peek() == 0xfb {
+        return "", true
+    }
+    length := int(p.readUInt8())
+    return string(p.readBytes(length)), false
 }
 
 func (p *Packet) writeUInt8(i uint8) {

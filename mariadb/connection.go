@@ -6,6 +6,7 @@ import (
     "context"
     "time"
     _ "log"
+    "strconv"
     "github.com/vasflam/lab-mysql-connector/mariadb/capabilities"
 )
 
@@ -24,6 +25,7 @@ type Config struct {
     Username string
     Password string
     Database string
+    Timeout time.Duration
 }
 
 /**
@@ -50,6 +52,7 @@ type Connection struct {
     packetQueue chan QueuePacket
     sequence uint8
     lastInsertId int
+    affectedRows int
 }
 
 /**
@@ -86,6 +89,10 @@ func (c *Connection) Close() {
 
 func (c *Connection) LastInsertId() int {
     return c.lastInsertId
+}
+
+func (c *Connection) AffectedRows() int {
+    return c.affectedRows
 }
 
 func (c *Connection) recv() (*Packet, error) {
@@ -138,7 +145,6 @@ func (c *Connection) send(packet *Packet) error {
  * chanel with responses
  */ 
 func (c *Connection) communicate(packet *Packet) chan QueuePacket {
-    //fmt.Printf("send packet: %v\n", packet)
     q := createQueuePacket(packet)
     go func() {
         c.packetQueue <- q
@@ -203,13 +209,12 @@ func (c *Connection) drainQueue() {
                 break
             }
 
-            fmt.Printf("packet: %v\n", packet.payload)
             q.c <- createQueuePacket(packet)
-            if packet.peek() < 9 && packet.peekAt(4) == 0xfe {
+
+            if packet.isOK() || packet.isEOF() {
                 break
             }
         }
-        fmt.Printf("closing channel\n")
         close(q.c)
     }
 
@@ -231,24 +236,23 @@ func (c *Connection) drainQueue() {
     }
 }
 
+// TODO: Refactor to PacketParser with itnerface typecast for column values
 func (c *Connection) Query(query string) (QueryResultRows, error){
     q := c.communicate(createQueryPacket(query))
     // read first packet to get columns packets
-    for response := range q {
-        fmt.Printf("%v\n", response.packet)
-    }
-    return nil,nil
     response := <- q
     if response.error != nil {
         return nil, response.error
     }
     packet := response.packet
     if packet.isOK() {
+        packet.skip(4)
         packet.skip(1)
-        _ = packet.readUIntEncodedLength()
+        c.affectedRows = packet.readUIntEncodedLength() // affected rows
         c.lastInsertId = int(packet.readUIntEncodedLength())
         return nil, nil
     }
+
     columnCount := int(packet.peekAt(4))
     rows := QueryResultRows{}
     columns := []TableColumn{}
@@ -267,11 +271,9 @@ func (c *Connection) Query(query string) (QueryResultRows, error){
         _ = packet.readStringLengthEncoded() // column
         if c.info.clientCapabilities & capabilities.MARIADB_CLIENT_EXTENDED_TYPE_INFO != 0 {
             count := packet.readUIntEncodedLength()
-            fmt.Printf("extended type count: %d\n", count)
             for i = 0; i < count; i++ {
-                t := packet.readUInt8()
-                v := packet.readStringLengthEncoded()
-                fmt.Printf("\t %d = %s\n", t, v)
+                _ = packet.readUInt8() // type
+                _ = packet.readStringLengthEncoded() // value
             }
         }
 
@@ -303,7 +305,7 @@ func (c *Connection) Query(query string) (QueryResultRows, error){
         }
         packet := response.packet
 
-        if packet.isEOF() {
+        if packet.isEOF() || packet.isOK() {
             break
         }
         packet.skip(4)
@@ -316,18 +318,20 @@ func (c *Connection) Query(query string) (QueryResultRows, error){
             if kind == MYSQL_TYPE_TINY ||
                 kind == MYSQL_TYPE_SHORT ||
                 kind == MYSQL_TYPE_LONG {
-                    bvalue := packet.readBytesEncodedLength()
-                    packet.pos -= len(bvalue) 
-                    value = (packet.readUIntEncodedLength() - 48)
-                    if value.(int) < 0 {
-                        value = value.(int) - 1
+                    str, isNULL := packet.readStringLengthEncodedNULLABLE()
+                    if isNULL {
+                        value = nil
+                    } else {
+                        var err error
+                        value, err = strconv.Atoi(str)
+                        if err != nil {
+                            return nil, err
+                        }
                     }
-                    fmt.Printf("aaa==%v ; bvalue=%v\n", value, bvalue)
             }
             row[column.name] = value
-            rows = append(rows, row)
-            fmt.Printf("%d: %v\n", i, 1)
         }
+        rows = append(rows, row)
         i += 1
     }
 
