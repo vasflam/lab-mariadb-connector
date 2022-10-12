@@ -2,13 +2,13 @@ package main
 
 import (
     "testing"
-    "github.com/vasflam/lab-mysql-connector/mysql"
-    "github.com/vasflam/lab-mysql-connector/mysql/capabilities"
+    "github.com/vasflam/lab-mysql-connector/mariadb"
+    "github.com/vasflam/lab-mysql-connector/mariadb/capabilities"
     "fmt"
 )
 
 var a = fmt.Errorf("")
-var b mysql.Connection
+var b mariadb.Connection
 var c = capabilities.DEFAULT
 
 func TestCapabilities(t *testing.T) {
@@ -78,5 +78,18 @@ func TestCapabilities(t *testing.T) {
     }
     if caps & capabilities.RESERVED != 0 {
         fmt.Println("RESERVED")
+    }
+}
+
+func TestChan(t *testing.T) {
+    c1 := make(chan int)
+    go func() {
+        c1 <- 1
+        close(c1)
+        fmt.Printf("closed\n")
+    }()
+
+    for a := range c1 {
+        fmt.Printf("a=%d\n", a)
     }
 }
